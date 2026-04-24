@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F7F6F2">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="BCG Copy">
+  <title>BCG Copy Work Log</title>
+  <link rel="manifest" href="manifest.json">
+  <!-- Apple touch icons -->
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <!-- React + Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; padding: 0; }
+    #root { height: 100%; }
+    /* Safe area insets for notched phones */
+    body { padding-bottom: env(safe-area-inset-bottom); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useCallback } = React;
+
+// ── Storage ────────────────────────────────────────────────────────────────
+const KEYS = { entries:"wl_e", office:"wl_o", recur:"wl_r", settings:"wl_s" };
+const load = (k,d) => { try { return JSON.parse(localStorage.getItem(k))||d; } catch { return d; } };
+const save = (k,v) => localStorage.setItem(k, JSON.stringify(v));
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+const fmt = n => { const v=parseFloat(n); if(isNaN(v)) return "$0.00"; return "$"+v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,","); };
+const calcTotal = e => {
+  const base = e.rateType==="hourly" ? (parseFloat(e.rate)||0)*(parseFloat(e.hours)||0) : (parseFloat(e.baseAmount)||0);
+  return base + (parseFloat(e.rushFee)||0) + (e.expenses||[]).reduce((s,x)=>s+(parseFloat(x.amount)||0),0);
+};
+const nowISO = () => new Date().toISOString().split("T")[0];
+const pad2   = n => String(n).padStart(2,"0");
+const isoFmt = iso => { if(!iso) return ""; const d=new Date(iso+"T12:00:00"); return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); };
+const genInvNum = entries => `INV-${new Date().getFullYear()}-${pad2(entries.filter(e=>e.invoiceNum).length+1)}`;
+
+const CATS = ["Software","Hardware","Office Supplies","Subscriptions","Marketing","Travel","Meals","Education","Utilities","Other"];
+
+const materializeRecurring = (rule, existing) => {
+  const now=new Date(), nowYM=now.getFullYear()*12+now.getMonth();
+  const start=new Date(rule.startDate+"T12:00:00"), startYM=start.getFullYear()*12+start.getMonth();
+  const out=[];
+  for(let ym=startYM;ym<=nowYM;ym++){
+    const yr=Math.floor(ym/12),mo=ym%12;
+    const day=Math.min(rule.dayOfMonth,new Date(yr,mo+1,0).getDate());
+    const iso=`${yr}-${pad2(mo+1)}-${pad2(day)}`;
+    if(!existing.some(e=>e.recurringId===rule.id&&e.date===iso))
+      out.push({id:`${rule.id}_${iso}_${Date.now()}_${Math.random()}`,recurringId:rule.id,description:rule.description,amount:rule.amount,category:rule.category,date:iso,dateDisplay:isoFmt(iso),notes:rule.notes||"",receipt:null,isRecurring:true});
+  }
+  return out;
+};
+
+// ── Tokens ─────────────────────────────────────────────────────────────────
+const C = {
+  bg:"#F7F6F2",sur:"#FFFFFF",alt:"#F0EEE8",bdr:"#E4E1D8",bdrS:"#C8C4B8",
+  txt:"#1A1814",sub:"#7A7570",muted:"#B0ACA4",acc:"#1A1814",accT:"#FFFFFF",
+  grn:"#1E7E5A",grnB:"#EAF5EF",org:"#C4581A",orgB:"#FDF0E8",
+  red:"#C41A1A",redB:"#FDE8E8",pur:"#6B3FA0",purB:"#F2EBF9",
+  blu:"#1A5FA0",bluB:"#E8F0FD",
+};
+const inp = {width:"100%",background:C.sur,border:`1.5px solid ${C.bdr}`,borderRadius:8,color:C.txt,fontSize:14,padding:"10px 13px",fontFamily:"'Geist Mono','DM Mono',monospace",outline:"none",boxSizing:"border-box",transition:"border-color .15s",WebkitAppearance:"none"};
+const lbl = {display:"block",fontSize:11,fontWeight:600,letterSpacing:"0.06em",color:C.sub,marginBottom:6,fontFamily:"'Outfit',sans-serif",textTransform:"uppercase"};
+const card = {background:C.sur,border:`1.5px solid ${C.bdr}`,borderRadius:14,padding:20,marginBottom:12};
+const secT = {fontSize:11,fontWeight:700,letterSpacing:"0.1em",color:C.muted,marginBottom:14,fontFamily:"'Outfit',sans-serif",textTransform:"uppercase"};
+
+const pill = (on,v="def") => {
+  const m={
+    def:{on:{background:C.acc,color:C.accT,border:`1.5px solid ${C.acc}`},off:{background:"transparent",color:C.sub,border:`1.5px solid ${C.bdr}`}},
+    grn:{on:{background:C.grn,color:"#fff",border:`1.5px solid ${C.grn}`},off:{background:"transparent",color:C.grn,border:`1.5px solid ${C.grn}`}},
+    red:{on:{background:C.red,color:"#fff",border:`1.5px solid ${C.red}`},off:{background:"transparent",color:C.red,border:`1.5px solid ${C.red}`}},
+    pur:{on:{background:C.pur,color:"#fff",border:`1.5px solid ${C.pur}`},off:{background:"transparent",color:C.pur,border:`1.5px solid ${C.pur}`}},
+    blu:{on:{background:C.blu,color:"#fff",border:`1.5px solid ${C.blu}`},off:{background:"transparent",color:C.blu,border:`1.5px solid ${C.blu}`}},
+  };
+  return {...(on?(m[v]||m.def).on:(m[v]||m.def).off),fontFamily:"'Outfit',sans-serif",fontSize:12,fontWeight:600,letterSpacing:"0.05em",padding:"7px 14px",cursor:"pointer",borderRadius:8,transition:"all .15s",textTransform:"uppercase"};
+};
+
+// ── Shared ─────────────────────────────────────────────────────────────────
+function Bdg({children,color="neu"}) {
+  const m={neu:[C.alt,C.sub],grn:[C.grnB,C.grn],org:[C.orgB,C.org],pur:[C.purB,C.pur],red:[C.redB,C.red],blu:[C.bluB,C.blu]};
+  const [bg,fg]=m[color]||m.neu;
+  return <span style={{background:bg,color:fg,fontSize:10,fontWeight:700,fontFamily:"'Outfit',sans-serif",letterSpacing:"0.07em",padding:"3px 8px",borderRadius:6,textTransform:"uppercase"}}>{children}</span>;
+}
+function Chip({label,value,grn,red}) {
+  return <div style={{background:C.sur,border:`1.5px solid ${C.bdr}`,borderRadius:12,padding:"14px 16px"}}>
+    <div style={{...lbl,marginBottom:4}}>{label}</div>
+    <div style={{fontFamily:"'Outfit',sans-serif",fontSize:20,fontWeight:700,letterSpacing:"-0.02em",color:red?C.red:grn?C.grn:C.sub}}>{value}</div>
+  </div>;
+}
+function RcptInput({fRef,cRef,receipt,onCapture,onClear}) {
+  return <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+    <span style={{...lbl,marginBottom:0}}>Receipt:</span>
+    <label style={{...pill(false),display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer"}}>📷 Photo<input ref={cRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={onCapture}/></label>
+    <label style={{...pill(false),display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer"}}>📁 Upload<input ref={fRef} type="file" accept="image/*" style={{display:"none"}} onChange={onCapture}/></label>
+    {receipt&&<div style={{display:"flex",alignItems:"center",gap:8}}><img src={receipt} alt="" style={{width:34,height:34,objectFit:"cover",borderRadius:6,border:`1.5px solid ${C.bdr}`}}/><Bdg color="grn">Attached</Bdg><button onClick={onClear} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>×</button></div>}
+  </div>;
+}
+
+// ── Nav ────────────────────────────────────────────────────────────────────
+const NAV=[{id:"LOG",icon:"✦"},{id:"OFFICE",icon:"⌂"},{id:"REPORT",icon:"◈"},{id:"INVOICE",icon:"◻"},{id:"SETTINGS",icon:"⊙"}];
+function NavBar({active,setActive}) {
+  return <div style={{display:"flex",borderBottom:`1.5px solid ${C.bdr}`,position:"sticky",top:0,background:C.bg,zIndex:20,padding:"0 4px"}}>
+    {NAV.map(n=><button key={n.id} onClick={()=>setActive(n.id)} style={{flex:1,background:"none",border:"none",borderBottom:`2.5px solid ${active===n.id?C.acc:"transparent"}`,color:active===n.id?C.txt:C.muted,fontFamily:"'Outfit',sans-serif",fontSize:10,fontWeight:700,letterSpacing:"0.06em",padding:"12px 0 10px",cursor:"pointer",transition:"all .15s",textTransform:"uppercase"}}>
+      <div style={{fontSize:13,marginBottom:2}}>{n.icon}</div>{n.id}
+    </button>)}
+  </div>;
+}
+
+// ── Entry Card ─────────────────────────────────────────────────────────────
+function EntryCard({entry,onDelete,onUpdate}) {
+  const [open,setOpen]=useState(false);
+  const total=calcTotal(entry);
+  return <div style={{background:C.sur,border:`1.5px solid ${open?C.bdrS:C.bdr}`,borderRadius:14,marginBottom:10,overflow:"hidden",transition:"all .15s",boxShadow:open?"0 4px 20px rgba(0,0,0,.06)":"0 1px 3px rgba(0,0,0,.03)"}}>
+    <div onClick={()=>setOpen(v=>!v)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 18px",cursor:"pointer",userSelect:"none"}}>
+      <div style={{minWidth:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2,flexWrap:"wrap"}}>
+          <span style={{fontFamily:"'Outfit',sans-serif",fontSize:15,fontWeight:700,color:C.txt}}>{entry.client}</span>
+          {entry.invoicePaid?<Bdg color="grn">Paid</Bdg>:entry.invoiceNum?<Bdg color="org">Invoiced</Bdg>:null}
+        </div>
+        <div style={{fontSize:12,color:C.muted,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{isoFmt(entry.dateISO)}{entry.jobDescription?` · ${entry.jobDescription}`:""}</div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0,marginLeft:10}}>
+        <span style={{fontFamily:"'Outfit',sans-serif",fontSize:17,fontWeight:800,color:C.txt,letterSpacing:"-0.02em"}}>{fmt(total)}</span>
+        <div style={{width:24,height:24,borderRadius:6,background:C.alt,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:C.muted,transition:"transform .2s",transform:open?"rotate(180deg)":"none"}}>▾</div>
+      </div>
+    </div>
+    {open&&<div style={{padding:"0 18px 18px",borderTop:`1.5px solid ${C.bdr}`,paddingTop:16}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(120px,1fr))",gap:8,marginBottom:14}}>
+        {entry.rateType==="hourly"?<><Chip label="Rate" value={fmt(entry.rate)+"/hr"}/><Chip label="Hours" value={entry.hours+"h"}/><Chip label="Subtotal" value={fmt((parseFloat(entry.rate)||0)*(parseFloat(entry.hours)||0))}/></>:<Chip label="Base Fee" value={fmt(entry.baseAmount)}/>}
+        {parseFloat(entry.rushFee)>0&&<Chip label={entry.rushFeeNote?`Rush (${entry.rushFeeNote})`:"Rush Fee"} value={fmt(entry.rushFee)}/>}
+      </div>
+      {(entry.expenses||[]).length>0&&<div style={{marginBottom:14}}>
+        <div style={secT}>Client Expenses</div>
+        {entry.expenses.map((ex,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:`1px solid ${C.bdr}`}}>
+          {ex.receipt&&<img src={ex.receipt} alt="" onClick={()=>window.open(ex.receipt,"_blank")} style={{width:40,height:40,objectFit:"cover",borderRadius:8,border:`1.5px solid ${C.bdr}`,cursor:"pointer",flexShrink:0}}/>}
+          <span style={{flex:1,fontSize:13,color:C.sub,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{ex.description}</span>
+          <span style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:C.txt}}>{fmt(ex.amount)}</span>
+        </div>)}
+      </div>}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:14,borderTop:`1.5px solid ${C.bdr}`}}>
+        <div style={{display:"flex",gap:8}}>
+          {entry.invoiceNum&&!entry.invoicePaid&&<button style={pill(false,"grn")} onClick={()=>onUpdate({...entry,invoicePaid:true})}>Mark Paid</button>}
+          <button style={pill(false,"red")} onClick={()=>onDelete(entry.id)}>Delete</button>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{...lbl,marginBottom:2}}>Total</div>
+          <div style={{fontFamily:"'Outfit',sans-serif",fontSize:22,fontWeight:800,color:C.txt,letterSpacing:"-0.02em"}}>{fmt(total)}</div>
+        </div>
+      </div>
+    </div>}
+  </div>;
+}
+
+// ── Log Tab ────────────────────────────────────────────────────────────────
+const EJOB={client:"",jobDescription:"",rateType:"hourly",rate:"",hours:"",baseAmount:"",rushFee:"",rushFeeNote:""};
+function LogTab({entries,setEntries}) {
+  const [form,setForm]=useState({...EJOB});
+  const [jobDate,setJobDate]=useState(nowISO());
+  const [exps,setExps]=useState([]);
+  const [eForm,setEForm]=useState({description:"",amount:"",receipt:null});
+  const [show,setShow]=useState(false);
+  const fRef=useRef(),cRef=useRef();
+  const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const addExp=()=>{
+    if(!eForm.description||!eForm.amount) return;
+    setExps(p=>[...p,{...eForm}]); setEForm({description:"",amount:"",receipt:null});
+    [fRef,cRef].forEach(r=>{if(r.current)r.current.value="";});
+  };
+  const onRcpt=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>setEForm(f=>({...f,receipt:ev.target.result}));r.readAsDataURL(f);};
+  const clearRcpt=()=>{setEForm(f=>({...f,receipt:null}));[fRef,cRef].forEach(r=>{if(r.current)r.current.value="";});};
+  const submit=()=>{
+    if(!form.client)return;
+    setEntries(p=>[{...form,expenses:exps,id:Date.now(),dateISO:jobDate,invoiceNum:null,invoicePaid:false},...p].sort((a,b)=>b.dateISO.localeCompare(a.dateISO)));
+    setForm({...EJOB});setExps([]);setJobDate(nowISO());setShow(false);
+  };
+  const allTotal=entries.reduce((s,e)=>s+calcTotal(e),0);
+  return <div style={{padding:"16px 16px 80px"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+      <div>
+        <div style={{fontFamily:"'Outfit',sans-serif",fontSize:28,fontWeight:800,color:C.txt,letterSpacing:"-0.03em",lineHeight:1.1}}>Work Log</div>
+        <div style={{fontSize:13,color:C.muted,marginTop:4,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{entries.length} {entries.length!==1?"entries":"entry"} · <span style={{color:C.grn,fontWeight:600}}>{fmt(allTotal)}</span></div>
+      </div>
+      <button onClick={()=>setShow(v=>!v)} style={{background:show?C.alt:C.acc,color:show?C.sub:C.accT,border:`1.5px solid ${show?C.bdr:C.acc}`,fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,padding:"9px 18px",borderRadius:10,cursor:"pointer",transition:"all .15s"}}>{show?"Cancel":"+ Log Job"}</button>
+    </div>
+    {show&&<div style={{...card,boxShadow:"0 4px 24px rgba(0,0,0,.07)"}}>
+      <div style={secT}>New Entry</div>
+      <div style={{marginBottom:14}}>
+        <label style={lbl}>Date</label>
+        <input type="date" style={{...inp,maxWidth:200}} value={jobDate} max={nowISO()} onChange={e=>setJobDate(e.target.value)}/>
+        {jobDate!==nowISO()&&<span style={{marginLeft:8,fontSize:11,color:C.org,fontWeight:600,background:C.orgB,padding:"3px 10px",borderRadius:6}}>{isoFmt(jobDate)} <button onClick={()=>setJobDate(nowISO())} style={{background:"none",border:"none",color:C.org,cursor:"pointer",fontSize:12}}>×</button></span>}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+        <div><label style={lbl}>Client</label><input style={inp} placeholder="Dapper, KoolMore…" value={form.client} onChange={e=>sf("client",e.target.value)}/></div>
+        <div><label style={lbl}>Job Description</label><input style={inp} placeholder="What did you do?" value={form.jobDescription} onChange={e=>sf("jobDescription",e.target.value)}/></div>
+      </div>
+      <div style={{marginBottom:14}}>
+        <label style={lbl}>Rate Type</label>
+        <div style={{display:"flex",gap:8}}>{["hourly","base"].map(t=><button key={t} style={pill(form.rateType===t)} onClick={()=>sf("rateType",t)}>{t==="hourly"?"Hourly":"Flat / Base"}</button>)}</div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:form.rateType==="hourly"?"1fr 1fr":"1fr",gap:12,marginBottom:14}}>
+        {form.rateType==="hourly"?<><div><label style={lbl}>Rate ($/hr)</label><input style={inp} type="number" placeholder="75" value={form.rate} onChange={e=>sf("rate",e.target.value)}/></div><div><label style={lbl}>Hours</label><input style={inp} type="number" placeholder="3.5" value={form.hours} onChange={e=>sf("hours",e.target.value)}/></div></>:<div><label style={lbl}>Base Amount ($)</label><input style={inp} type="number" placeholder="500" value={form.baseAmount} onChange={e=>sf("baseAmount",e.target.value)}/></div>}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:12,marginBottom:20}}>
+        <div><label style={lbl}>Rush Fee ($)</label><input style={inp} type="number" placeholder="0" value={form.rushFee} onChange={e=>sf("rushFee",e.target.value)}/></div>
+        <div><label style={lbl}>Rush Note</label><input style={inp} placeholder="Same-day…" value={form.rushFeeNote} onChange={e=>sf("rushFeeNote",e.target.value)}/></div>
+      </div>
+      <div style={{background:C.bg,borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={secT}>Client Expenses (billed to client)</div>
+        {exps.map((ex,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:C.sur,borderRadius:8,border:`1.5px solid ${C.bdr}`,marginBottom:8}}>
+          {ex.receipt&&<img src={ex.receipt} alt="" style={{width:36,height:36,objectFit:"cover",borderRadius:6,border:`1.5px solid ${C.bdr}`,flexShrink:0}}/>}
+          <span style={{flex:1,fontSize:13,color:C.sub,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{ex.description}</span>
+          <span style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:C.txt}}>{fmt(ex.amount)}</span>
+          <button onClick={()=>setExps(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16}}>×</button>
+        </div>)}
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:8,marginBottom:12}}>
+          <input style={inp} placeholder="Description" value={eForm.description} onChange={e=>setEForm(f=>({...f,description:e.target.value}))}/>
+          <input style={inp} type="number" placeholder="$0.00" value={eForm.amount} onChange={e=>setEForm(f=>({...f,amount:e.target.value}))}/>
+          <button style={{...pill(true),padding:"0 16px"}} onClick={addExp}>Add</button>
+        </div>
+        <RcptInput fRef={fRef} cRef={cRef} receipt={eForm.receipt} onCapture={onRcpt} onClear={clearRcpt}/>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:14,borderTop:`1.5px solid ${C.bdr}`}}>
+        <div><div style={lbl}>Total</div><div style={{fontFamily:"'Outfit',sans-serif",fontSize:26,fontWeight:800,color:C.txt,letterSpacing:"-0.03em"}}>{fmt(calcTotal({...form,expenses:exps}))}</div></div>
+        <button onClick={submit} disabled={!form.client} style={{background:form.client?C.acc:C.alt,color:form.client?C.accT:C.muted,border:"none",fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,padding:"12px 28px",cursor:form.client?"pointer":"default",borderRadius:10,transition:"all .15s"}}>Save Entry</button>
+      </div>
+    </div>}
+    {entries.length===0&&!show&&<div style={{textAlign:"center",paddingTop:70,color:C.muted,fontFamily:"'Outfit',sans-serif",fontSize:15}}>No entries yet</div>}
+    {entries.map(e=><EntryCard key={e.id} entry={e} onDelete={id=>setEntries(p=>p.filter(x=>x.id!==id))} onUpdate={u=>setEntries(p=>p.map(x=>x.id===u.id?u:x))}/>)}
+  </div>;
+}
+
+// ── Office Tab ─────────────────────────────────────────────────────────────
+function OfficeTab({officeExp,setOfficeExp,recurring,setRecurring}) {
+  const [view,setView]=useState("expenses");
+  const [form,setForm]=useState({description:"",amount:"",category:"Other",date:nowISO(),notes:"",receipt:null});
+  const [showF,setShowF]=useState(false);
+  const [rForm,setRForm]=useState({description:"",amount:"",category:"Subscriptions",dayOfMonth:"1",startDate:nowISO(),notes:""});
+  const [showRF,setShowRF]=useState(false);
+  const [filterCat,setFilterCat]=useState("All");
+  const fRef=useRef(),cRef=useRef();
+  const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const srf=(k,v)=>setRForm(f=>({...f,[k]:v}));
+  const onRcpt=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>sf("receipt",ev.target.result);r.readAsDataURL(f);};
+  const clearRcpt=()=>{sf("receipt",null);[fRef,cRef].forEach(r=>{if(r.current)r.current.value="";});};
+  const submitExp=()=>{
+    if(!form.description||!form.amount)return;
+    setOfficeExp(p=>[...p,{...form,id:Date.now(),dateDisplay:isoFmt(form.date),isRecurring:false}].sort((a,b)=>b.date.localeCompare(a.date)));
+    setForm({description:"",amount:"",category:"Other",date:nowISO(),notes:"",receipt:null});
+    [fRef,cRef].forEach(r=>{if(r.current)r.current.value="";});setShowF(false);
+  };
+  const submitRec=()=>{
+    if(!rForm.description||!rForm.amount)return;
+    const rule={...rForm,id:`rec_${Date.now()}`,active:true};
+    const newE=materializeRecurring(rule,officeExp);
+    setRecurring(p=>[...p,rule]);
+    if(newE.length) setOfficeExp(p=>[...p,...newE].sort((a,b)=>b.date.localeCompare(a.date)));
+    setRForm({description:"",amount:"",category:"Subscriptions",dayOfMonth:"1",startDate:nowISO(),notes:""});setShowRF(false);
+  };
+  useEffect(()=>{
+    let added=[];
+    recurring.filter(r=>r.active).forEach(rule=>{
+      const n=materializeRecurring(rule,[...officeExp,...added]);added=[...added,...n];
+    });
+    if(added.length) setOfficeExp(p=>[...p,...added].sort((a,b)=>b.date.localeCompare(a.date)));
+  },[recurring]);
+  const allCats=["All",...CATS.filter(c=>officeExp.some(e=>e.category===c))];
+  const visible=filterCat==="All"?officeExp:officeExp.filter(e=>e.category===filterCat);
+  const totalAll=officeExp.reduce((s,e)=>s+(parseFloat(e.amount)||0),0);
+  const recMo=recurring.filter(r=>r.active).reduce((s,r)=>s+(parseFloat(r.amount)||0),0);
+  const catT={};officeExp.forEach(e=>{catT[e.category]=(catT[e.category]||0)+(parseFloat(e.amount)||0);});
+  const catRows=Object.entries(catT).sort((a,b)=>b[1]-a[1]);
+  const maxCat=catRows[0]?.[1]||1;
+  return <div style={{padding:"16px 16px 80px"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+      <div>
+        <div style={{fontFamily:"'Outfit',sans-serif",fontSize:28,fontWeight:800,color:C.txt,letterSpacing:"-0.03em",lineHeight:1.1}}>Office Expenses</div>
+        <div style={{fontSize:13,color:C.muted,marginTop:4,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{officeExp.length} items · <span style={{color:C.red,fontWeight:600}}>{fmt(totalAll)}</span>{recurring.filter(r=>r.active).length>0&&<> · <span style={{color:C.blu,fontWeight:600}}>{fmt(recMo)}/mo</span></>}</div>
+      </div>
+    </div>
+    <div style={{display:"flex",gap:8,marginBottom:16}}>
+      <button style={{...pill(view==="expenses"),fontSize:11,padding:"6px 14px"}} onClick={()=>setView("expenses")}>Expenses</button>
+      <button style={{...pill(view==="recurring","blu"),fontSize:11,padding:"6px 14px"}} onClick={()=>setView("recurring")}>Recurring {recurring.filter(r=>r.active).length>0&&`(${recurring.filter(r=>r.active).length})`}</button>
+    </div>
+    {view==="expenses"&&<>
+      <div style={{background:C.purB,border:`1.5px solid #D4C0EC`,borderRadius:12,padding:"12px 16px",marginBottom:14,display:"flex",gap:10}}>
+        <span style={{fontSize:15,flexShrink:0}}>⌂</span>
+        <div style={{fontSize:12,color:C.pur,fontFamily:"'Outfit',sans-serif",lineHeight:1.5}}><strong>Not billed to clients.</strong> Appears in Report as overhead for P&L.</div>
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <button onClick={()=>setShowF(v=>!v)} style={{background:showF?C.alt:C.acc,color:showF?C.sub:C.accT,border:`1.5px solid ${showF?C.bdr:C.acc}`,fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,padding:"9px 18px",borderRadius:10,cursor:"pointer",transition:"all .15s"}}>{showF?"Cancel":"+ Add Expense"}</button>
+      </div>
+      {showF&&<div style={{...card,boxShadow:"0 4px 24px rgba(0,0,0,.07)",marginBottom:16}}>
+        <div style={secT}>New Office Expense</div>
+        <div style={{marginBottom:14}}>
+          <label style={lbl}>Date</label>
+          <input type="date" style={{...inp,maxWidth:200}} value={form.date} max={nowISO()} onChange={e=>sf("date",e.target.value)}/>
+          {form.date!==nowISO()&&<span style={{marginLeft:8,fontSize:11,color:C.org,fontWeight:600,background:C.orgB,padding:"3px 10px",borderRadius:6}}>Past — {isoFmt(form.date)}</span>}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div><label style={lbl}>Description</label><input style={inp} placeholder="Adobe CC…" value={form.description} onChange={e=>sf("description",e.target.value)}/></div>
+          <div><label style={lbl}>Amount ($)</label><input style={inp} type="number" placeholder="0.00" value={form.amount} onChange={e=>sf("amount",e.target.value)}/></div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div><label style={lbl}>Category</label><select style={{...inp,appearance:"none"}} value={form.category} onChange={e=>sf("category",e.target.value)}>{CATS.map(c=><option key={c}>{c}</option>)}</select></div>
+          <div><label style={lbl}>Notes</label><input style={inp} placeholder="Annual plan…" value={form.notes} onChange={e=>sf("notes",e.target.value)}/></div>
+        </div>
+        <div style={{marginBottom:16}}><RcptInput fRef={fRef} cRef={cRef} receipt={form.receipt} onCapture={onRcpt} onClear={clearRcpt}/></div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:14,borderTop:`1.5px solid ${C.bdr}`}}>
+          <div><div style={lbl}>Amount</div><div style={{fontFamily:"'Outfit',sans-serif",fontSize:24,fontWeight:800,color:C.red,letterSpacing:"-0.03em"}}>{fmt(form.amount)}</div></div>
+          <button onClick={submitExp} disabled={!form.description||!form.amount} style={{background:form.description&&form.amount?C.acc:C.alt,color:form.description&&form.amount?C.accT:C.muted,border:"none",fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,padding:"12px 28px",borderRadius:10,cursor:form.description&&form.amount?"pointer":"default"}}>Save Expense</button>
+        </div>
+      </div>}
+      {catRows.length>0&&<div style={card}><div style={secT}>By Category</div>{catRows.map(([cat,t])=><div key={cat} style={{marginBottom:12}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:600,color:C.txt}}>{cat}</span><span style={{fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,color:C.red}}>{fmt(t)}</span></div><div style={{height:5,background:C.alt,borderRadius:4}}><div style={{height:"100%",width:`${(t/maxCat)*100}%`,background:C.red,borderRadius:4,opacity:0.6}}/></div></div>)}</div>}
+      {allCats.length>2&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>{allCats.map(c=><button key={c} style={{...pill(filterCat===c),fontSize:11,padding:"5px 11px"}} onClick={()=>setFilterCat(c)}>{c}</button>)}</div>}
+      {visible.length===0&&!showF&&<div style={{textAlign:"center",paddingTop:50,color:C.muted,fontFamily:"'Outfit',sans-serif",fontSize:15}}>{officeExp.length===0?"No office expenses yet":"No expenses in this category"}</div>}
+      {visible.map(exp=><OffExpCard key={exp.id} exp={exp} onDelete={id=>setOfficeExp(p=>p.filter(x=>x.id!==id))}/>)}
+    </>}
+    {view==="recurring"&&<>
+      <div style={{background:C.bluB,border:`1.5px solid ${C.blu}30`,borderRadius:12,padding:"12px 16px",marginBottom:14,display:"flex",gap:10}}>
+        <span style={{fontSize:15,flexShrink:0}}>↻</span>
+        <div style={{fontSize:12,color:C.blu,fontFamily:"'Outfit',sans-serif",lineHeight:1.5}}><strong>Recurring expenses</strong> auto-generate monthly entries from their start date through today.</div>
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <button onClick={()=>setShowRF(v=>!v)} style={{background:showRF?C.alt:C.blu,color:showRF?C.sub:"#fff",border:`1.5px solid ${showRF?C.bdr:C.blu}`,fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,padding:"9px 18px",borderRadius:10,cursor:"pointer",transition:"all .15s"}}>{showRF?"Cancel":"+ Add Recurring"}</button>
+      </div>
+      {showRF&&<div style={{...card,border:`1.5px solid ${C.blu}50`,marginBottom:16}}>
+        <div style={{...secT,color:C.blu}}>New Recurring Expense</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div><label style={lbl}>Description</label><input style={inp} placeholder="Adobe CC, Rent…" value={rForm.description} onChange={e=>srf("description",e.target.value)}/></div>
+          <div><label style={lbl}>Monthly Amount ($)</label><input style={inp} type="number" placeholder="0.00" value={rForm.amount} onChange={e=>srf("amount",e.target.value)}/></div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div><label style={lbl}>Category</label><select style={{...inp,appearance:"none"}} value={rForm.category} onChange={e=>srf("category",e.target.value)}>{CATS.map(c=><option key={c}>{c}</option>)}</select></div>
+          <div><label style={lbl}>Day of Month</label><select style={{...inp,appearance:"none"}} value={rForm.dayOfMonth} onChange={e=>srf("dayOfMonth",e.target.value)}>{Array.from({length:28},(_,i)=>i+1).map(d=><option key={d} value={d}>{d}</option>)}</select></div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+          <div><label style={lbl}>Start Date</label><input type="date" style={inp} value={rForm.startDate} onChange={e=>srf("startDate",e.target.value)}/><div style={{fontSize:11,color:C.muted,marginTop:5}}>Past dates will backfill entries.</div></div>
+          <div><label style={lbl}>Notes</label><input style={inp} placeholder="Annual plan…" value={rForm.notes} onChange={e=>srf("notes",e.target.value)}/></div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:14,borderTop:`1.5px solid ${C.bdr}`}}>
+          <div><div style={lbl}>Monthly Cost</div><div style={{fontFamily:"'Outfit',sans-serif",fontSize:24,fontWeight:800,color:C.blu,letterSpacing:"-0.03em"}}>{fmt(rForm.amount)}/mo</div></div>
+          <button onClick={submitRec} disabled={!rForm.description||!rForm.amount} style={{background:rForm.description&&rForm.amount?C.blu:C.alt,color:rForm.description&&rForm.amount?"#fff":C.muted,border:"none",fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,padding:"12px 28px",borderRadius:10,cursor:rForm.description&&rForm.amount?"pointer":"default"}}>Create Rule</button>
+        </div>
+      </div>}
+      {recurring.length===0&&!showRF&&<div style={{textAlign:"center",paddingTop:50,color:C.muted,fontFamily:"'Outfit',sans-serif",fontSize:15}}>No recurring expenses yet</div>}
+      {recurring.map(rule=><div key={rule.id} style={{background:C.sur,border:`1.5px solid ${rule.active?C.blu+"50":C.bdr}`,borderRadius:12,padding:"16px 18px",marginBottom:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div style={{minWidth:0}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:15,fontWeight:700,color:rule.active?C.txt:C.muted}}>{rule.description}</span><Bdg color={rule.active?"blu":"neu"}>{rule.active?"Active":"Paused"}</Bdg><Bdg color="pur">{rule.category}</Bdg></div><div style={{fontSize:12,color:C.muted,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{fmt(rule.amount)}/mo · Day {rule.dayOfMonth} · since {isoFmt(rule.startDate)}</div>{rule.notes&&<div style={{fontSize:12,color:C.sub,marginTop:4}}>{rule.notes}</div>}</div>
+          <div style={{fontFamily:"'Outfit',sans-serif",fontSize:18,fontWeight:800,color:rule.active?C.blu:C.muted,flexShrink:0,marginLeft:10}}>{fmt(rule.amount)}</div>
+        </div>
+        <div style={{display:"flex",gap:8,marginTop:14,paddingTop:12,borderTop:`1px solid ${C.bdr}`}}>
+          <button style={{...pill(rule.active,"blu"),fontSize:11,padding:"5px 12px"}} onClick={()=>setRecurring(p=>p.map(r=>r.id===rule.id?{...r,active:!r.active}:r))}>{rule.active?"Pause":"Resume"}</button>
+          <button style={{...pill(false,"red"),fontSize:11,padding:"5px 12px"}} onClick={()=>{if(window.confirm("Delete rule? Past entries remain."))setRecurring(p=>p.filter(r=>r.id!==rule.id));}}>Delete Rule</button>
+        </div>
+      </div>)}
+      {recurring.filter(r=>r.active).length>0&&<div style={{...card,background:C.bluB,border:`1.5px solid ${C.blu}30`,marginTop:8}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:C.blu}}>Total Monthly Recurring</span><span style={{fontFamily:"'Outfit',sans-serif",fontSize:20,fontWeight:800,color:C.blu,letterSpacing:"-0.02em"}}>{fmt(recMo)}/mo</span></div><div style={{fontSize:12,color:C.blu,marginTop:4,opacity:0.7}}>≈ {fmt(recMo*12)} / year</div></div>}
+    </>}
+  </div>;
+}
+
+function OffExpCard({exp,onDelete}) {
+  const [open,setOpen]=useState(false);
+  return <div style={{background:C.sur,border:`1.5px solid ${open?C.bdrS:C.bdr}`,borderRadius:12,marginBottom:8,overflow:"hidden",transition:"all .15s"}}>
+    <div onClick={()=>setOpen(v=>!v)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"13px 16px",cursor:"pointer",userSelect:"none"}}>
+      <div style={{minWidth:0}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2,flexWrap:"wrap"}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:C.txt}}>{exp.description}</span><Bdg color="pur">{exp.category}</Bdg>{exp.isRecurring&&<Bdg color="blu">↻</Bdg>}</div><div style={{fontSize:11,color:C.muted,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{exp.dateDisplay||isoFmt(exp.date)}</div></div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0,marginLeft:10}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:16,fontWeight:800,color:C.red,letterSpacing:"-0.02em"}}>{fmt(exp.amount)}</span><div style={{width:22,height:22,borderRadius:6,background:C.alt,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:C.muted,transition:"transform .2s",transform:open?"rotate(180deg)":"none"}}>▾</div></div>
+    </div>
+    {open&&<div style={{padding:"0 16px 14px",borderTop:`1.5px solid ${C.bdr}`,paddingTop:14}}>
+      {exp.notes&&<div style={{fontSize:13,color:C.sub,fontFamily:"'Geist Mono','DM Mono',monospace",marginBottom:12}}>{exp.notes}</div>}
+      {exp.receipt&&<img src={exp.receipt} alt="receipt" onClick={()=>window.open(exp.receipt,"_blank")} style={{width:80,height:80,objectFit:"cover",borderRadius:8,border:`1.5px solid ${C.bdr}`,cursor:"pointer",display:"block",marginBottom:12}}/>}
+      {!exp.isRecurring?<button style={pill(false,"red")} onClick={()=>onDelete(exp.id)}>Delete</button>:<span style={{fontSize:12,color:C.muted,fontFamily:"'Outfit',sans-serif"}}>Auto-generated · manage via Recurring tab</span>}
+    </div>}
+  </div>;
+}
+
+// ── Invoice HTML builder ───────────────────────────────────────────────────
+// ── BCG Copy brand constants ───────────────────────────────────────────────
+const BCG={
+  purple:"#7B2FBE",     // primary purple
+  purpleLight:"#EDE5F8",// light tint rows
+  purpleDark:"#5A1F90", // darker shade
+  white:"#FFFFFF",
+};
+
+// Shared row builder for both HTML and React
+const buildRows=(ents)=>ents.map(e=>{
+  const b=e.rateType==="hourly"?(parseFloat(e.rate)||0)*(parseFloat(e.hours)||0):(parseFloat(e.baseAmount)||0);
+  const qty=e.rateType==="hourly"?`${e.hours}h`:e.qty||"1";
+  const unitPrice=e.rateType==="hourly"?`${fmt(e.rate)}/hr`:e.baseAmount?fmt(parseFloat(e.baseAmount)/Math.max(1,parseFloat(e.qty||1))):"—";
+  const rows=[{desc:e.jobDescription||e.client,qty,unitPrice,amount:fmt(b),sub:isoFmt(e.dateISO)}];
+  if(parseFloat(e.rushFee)>0)rows.push({desc:`Rush fee${e.rushFeeNote?` — ${e.rushFeeNote}`:""}`,qty:"",unitPrice:"",amount:fmt(e.rushFee),sub:""});
+  (e.expenses||[]).forEach(ex=>rows.push({desc:`Expense — ${ex.description}`,qty:"",unitPrice:"",amount:fmt(ex.amount),sub:""}));
+  return rows;
+}).flat();
+
+const buildInvHtml=(inv)=>{
+  const{invNum,from,addr,email,phone,clientName,entries:ents,total,dueDate,note}=inv;
+  const dateStr=new Date().toLocaleDateString("en-US",{month:"2-digit",day:"2-digit",year:"numeric"});
+  const rows=buildRows(ents);
+  const rowsHtml=rows.map((r,i)=>`
+    <tr style="background:${i%2===0?"#fff":BCG.purpleLight}">
+      <td style="padding:9px 10px;font-size:13px;border-bottom:1px solid #e8e0f4">${r.desc}${r.sub?`<div style="font-size:10px;color:#999;margin-top:2px;font-family:monospace">${r.sub}</div>`:""}</td>
+      <td style="padding:9px 10px;font-size:13px;border-bottom:1px solid #e8e0f4;text-align:center">${r.qty}</td>
+      <td style="padding:9px 10px;font-size:13px;border-bottom:1px solid #e8e0f4;text-align:right">${r.unitPrice}</td>
+      <td style="padding:9px 10px;font-size:13px;border-bottom:1px solid #e8e0f4;text-align:right;font-weight:600">${r.amount}</td>
+    </tr>`).join("");
+
+  return`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${invNum}</title><style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:ital,wght@0,400;0,600;0,700;0,800;1,700&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Outfit',Helvetica,sans-serif;background:#f4f4f4;padding:24px 16px}
+    .page{background:#fff;max-width:720px;margin:0 auto;box-shadow:0 2px 24px rgba(0,0,0,.1)}
+    @media print{body{background:#fff;padding:0}.page{box-shadow:none}}
+  </style></head><body><div class="page">
+
+    <!-- Top bar: logo left, Invoice title right -->
+    <div style="display:flex;align-items:stretch;min-height:72px">
+      <div style="background:#fff;padding:16px 24px;display:flex;align-items:center;flex:1">
+        <div style="font-size:26px;font-weight:800;color:${BCG.purple};letter-spacing:-.02em;font-style:italic">
+          <span style="font-style:normal;color:#1A1814">BCG </span>Copy
+          <div style="display:inline-block;background:${BCG.purple};width:6px;height:100%;vertical-align:middle;margin-left:4px"></div>
+        </div>
+      </div>
+      <div style="background:${BCG.purple};padding:16px 32px;display:flex;align-items:center;min-width:220px;clip-path:polygon(16px 0,100% 0,100% 100%,0 100%)">
+        <div style="font-size:30px;font-style:italic;font-weight:700;color:#fff;letter-spacing:-.01em;padding-left:12px">Invoice</div>
+      </div>
+    </div>
+
+    <!-- Address block -->
+    <div style="padding:20px 24px 16px;font-size:13px;color:#444;line-height:1.7">
+      ${addr||"672 Empire Blvd #7C"}<br>
+      ${from?" ":"Brooklyn, NY 11213"}<br>
+      ${phone||"(616) 334-4647"}
+      ${email?`<br>${email}`:""}
+    </div>
+
+    <!-- Bill To / Invoice # / Date row -->
+    <div style="display:grid;grid-template-columns:3fr 2fr;gap:0;margin:0 24px 20px">
+      <div style="background:${BCG.purple};padding:8px 14px">
+        <div style="font-size:12px;font-weight:700;color:#fff">Bill To:</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr">
+        <div style="background:${BCG.purple};padding:8px 14px"><div style="font-size:12px;font-weight:700;color:#fff">Invoice #</div></div>
+        <div style="background:${BCG.purple};padding:8px 14px"><div style="font-size:12px;font-weight:700;color:#fff">Date</div></div>
+      </div>
+      <!-- Values row -->
+      <div style="background:${BCG.purpleLight};padding:10px 14px;font-size:14px;font-weight:600;color:#1A1814">${clientName}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr">
+        <div style="background:${BCG.purpleLight};padding:10px 14px;font-size:14px;font-weight:600;color:#1A1814">${invNum}</div>
+        <div style="background:${BCG.purpleLight};padding:10px 14px;font-size:14px;font-weight:600;color:#1A1814">${dateStr}</div>
+      </div>
+    </div>
+
+    <!-- Line items table -->
+    <div style="margin:0 24px 24px">
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="background:${BCG.purple}">
+            <th style="padding:9px 10px;font-size:12px;font-weight:700;color:#fff;text-align:left">Description</th>
+            <th style="padding:9px 10px;font-size:12px;font-weight:700;color:#fff;text-align:center;width:60px">QTY</th>
+            <th style="padding:9px 10px;font-size:12px;font-weight:700;color:#fff;text-align:right;width:110px">Unit Price</th>
+            <th style="padding:9px 10px;font-size:12px;font-weight:700;color:#fff;text-align:right;width:110px">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+
+    <!-- Total box -->
+    <div style="display:flex;justify-content:flex-end;padding:0 24px 36px">
+      <div style="background:${BCG.purple};padding:12px 28px;display:flex;align-items:center;gap:32px;min-width:280px">
+        <div style="font-size:16px;font-weight:800;color:#fff;letter-spacing:.04em">TOTAL</div>
+        <div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-.01em">${fmt(total)}</div>
+      </div>
+    </div>
+
+    ${note?`<div style="margin:0 24px 24px;padding:14px;background:#f9f9f9;border-left:4px solid ${BCG.purple};font-size:12px;color:#555"><strong>Note:</strong> ${note}</div>`:""}
+    ${dueDate?`<div style="margin:0 24px 24px;font-size:12px;color:#555"><strong style="color:${BCG.purple}">Due Date:</strong> ${isoFmt(dueDate)}</div>`:""}
+
+  </div></body></html>`;
+};
+
+// ── Invoice Preview (React) ────────────────────────────────────────────────
+function InvDoc({inv}) {
+  const{invNum,from,addr,email,phone,clientName,entries:ents,total,dueDate,note}=inv;
+  const dateStr=new Date().toLocaleDateString("en-US",{month:"2-digit",day:"2-digit",year:"numeric"});
+  const rows=buildRows(ents);
+  return <div style={{fontFamily:"'Outfit',Helvetica,sans-serif",color:"#1A1814",fontSize:13,background:"#fff"}}>
+
+    {/* Header band */}
+    <div style={{display:"flex",alignItems:"stretch",minHeight:68}}>
+      <div style={{background:"#fff",padding:"14px 22px",display:"flex",alignItems:"center",flex:1}}>
+        <div style={{fontSize:24,fontWeight:800,color:BCG.purple,letterSpacing:"-.02em"}}>
+          <span style={{fontStyle:"normal",color:"#1A1814"}}>BCG </span>
+          <span style={{fontStyle:"italic"}}>Copy</span>
+        </div>
+      </div>
+      <div style={{background:BCG.purple,padding:"14px 28px",display:"flex",alignItems:"center",minWidth:200,clipPath:"polygon(14px 0,100% 0,100% 100%,0 100%)"}}>
+        <div style={{fontSize:26,fontStyle:"italic",fontWeight:700,color:"#fff",paddingLeft:10}}>Invoice</div>
+      </div>
+    </div>
+
+    {/* Address */}
+    <div style={{padding:"18px 22px 14px",fontSize:13,color:"#444",lineHeight:1.7}}>
+      <div>{addr||"672 Empire Blvd #7C"}</div>
+      <div>{addr?"":("Brooklyn, NY 11213")}</div>
+      <div>{phone||"(616) 334-4647"}</div>
+      {email&&<div>{email}</div>}
+    </div>
+
+    {/* Bill To / Invoice# / Date */}
+    <div style={{display:"grid",gridTemplateColumns:"3fr 2fr",margin:"0 22px 18px"}}>
+      <div style={{background:BCG.purple,padding:"7px 12px"}}><div style={{fontSize:12,fontWeight:700,color:"#fff"}}>Bill To:</div></div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr"}}>
+        <div style={{background:BCG.purple,padding:"7px 12px"}}><div style={{fontSize:12,fontWeight:700,color:"#fff"}}>Invoice #</div></div>
+        <div style={{background:BCG.purple,padding:"7px 12px"}}><div style={{fontSize:12,fontWeight:700,color:"#fff"}}>Date</div></div>
+      </div>
+      <div style={{background:BCG.purpleLight,padding:"9px 12px",fontSize:13,fontWeight:600}}>{clientName}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr"}}>
+        <div style={{background:BCG.purpleLight,padding:"9px 12px",fontSize:13,fontWeight:600}}>{invNum}</div>
+        <div style={{background:BCG.purpleLight,padding:"9px 12px",fontSize:13,fontWeight:600}}>{dateStr}</div>
+      </div>
+    </div>
+
+    {/* Line items */}
+    <div style={{margin:"0 22px 22px"}}>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead>
+          <tr style={{background:BCG.purple}}>
+            {[["Description","left"],["QTY","center"],["Unit Price","right"],["Amount","right"]].map(([h,a])=>
+              <th key={h} style={{padding:"8px 10px",fontSize:11,fontWeight:700,color:"#fff",textAlign:a}}>{h}</th>
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r,i)=><tr key={i} style={{background:i%2===0?"#fff":BCG.purpleLight}}>
+            <td style={{padding:"9px 10px",fontSize:13,borderBottom:"1px solid #e8e0f4",verticalAlign:"top"}}>
+              {r.desc}{r.sub&&<div style={{fontSize:10,color:"#999",marginTop:2,fontFamily:"monospace"}}>{r.sub}</div>}
+            </td>
+            <td style={{padding:"9px 10px",fontSize:13,borderBottom:"1px solid #e8e0f4",textAlign:"center"}}>{r.qty}</td>
+            <td style={{padding:"9px 10px",fontSize:13,borderBottom:"1px solid #e8e0f4",textAlign:"right"}}>{r.unitPrice}</td>
+            <td style={{padding:"9px 10px",fontSize:13,borderBottom:"1px solid #e8e0f4",textAlign:"right",fontWeight:600}}>{r.amount}</td>
+          </tr>)}
+        </tbody>
+      </table>
+    </div>
+
+    {/* Total */}
+    <div style={{display:"flex",justifyContent:"flex-end",padding:"0 22px 30px"}}>
+      <div style={{background:BCG.purple,padding:"11px 26px",display:"flex",alignItems:"center",gap:28,minWidth:260}}>
+        <div style={{fontSize:15,fontWeight:800,color:"#fff",letterSpacing:".04em"}}>TOTAL</div>
+        <div style={{fontSize:20,fontWeight:800,color:"#fff"}}>{fmt(total)}</div>
+      </div>
+    </div>
+
+    {dueDate&&<div style={{margin:"0 22px 14px",fontSize:12,color:"#555"}}><strong style={{color:BCG.purple}}>Due Date:</strong> {isoFmt(dueDate)}</div>}
+    {note&&<div style={{margin:"0 22px 24px",padding:"12px 14px",background:"#f9f9f9",borderLeft:`4px solid ${BCG.purple}`,fontSize:12,color:"#555"}}><strong>Note:</strong> {note}</div>}
+
+    {/* footer spacer */}
+    <div style={{height:20}}/>
+  </div>;
+}
+
+// ── Report Tab ─────────────────────────────────────────────────────────────
+function ReportTab({entries,officeExp}) {
+  const [range,setRange]=useState("month");
+  const [cf,setCf]=useState(""),[ct,setCt]=useState("");
+  const filterR=useCallback((items,field="dateISO")=>{
+    const now=new Date();
+    return items.filter(item=>{
+      const iso=item[field]||item.date; if(!iso)return false;
+      const d=new Date(iso+"T12:00:00");
+      if(range==="week"){const s=new Date(now);s.setDate(now.getDate()-now.getDay());return d>=s;}
+      if(range==="month")return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();
+      if(range==="year")return d.getFullYear()===now.getFullYear();
+      if(range==="custom"&&cf&&ct)return d>=new Date(cf)&&d<=new Date(ct+"T23:59:59");
+      return true;
+    });
+  },[range,cf,ct]);
+  const data=filterR(entries,"dateISO"),offD=filterR(officeExp,"date");
+  const rev=data.reduce((s,e)=>s+calcTotal(e),0);
+  const cExp=data.reduce((s,e)=>s+(e.expenses||[]).reduce((ss,x)=>ss+(parseFloat(x.amount)||0),0),0);
+  const rush=data.reduce((s,e)=>s+(parseFloat(e.rushFee)||0),0);
+  const offT=offD.reduce((s,e)=>s+(parseFloat(e.amount)||0),0);
+  const net=rev-offT;
+  const byC={};data.forEach(e=>{const c=e.client||"Unknown";if(!byC[c])byC[c]={total:0,count:0};byC[c].total+=calcTotal(e);byC[c].count++;});
+  const cRows=Object.entries(byC).sort((a,b)=>b[1].total-a[1].total);
+  const maxC=cRows[0]?.[1].total||1;
+  const offByCat={};offD.forEach(e=>{offByCat[e.category]=(offByCat[e.category]||0)+(parseFloat(e.amount)||0);});
+  const offCR=Object.entries(offByCat).sort((a,b)=>b[1]-a[1]);
+  const printR=()=>{
+    const rl=range==="custom"?`${cf} – ${ct}`:range.charAt(0).toUpperCase()+range.slice(1);
+    const w=window.open("","_blank");
+    w.document.write(`<!DOCTYPE html><html><head><title>P&L Report</title><style>
+      @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=DM+Mono:wght@400&display=swap');
+      *{box-sizing:border-box;margin:0;padding:0}body{font-family:'Outfit',sans-serif;background:#fff;color:#1A1814;padding:40px;max-width:780px;margin:0 auto;font-size:13px}
+      h1{font-size:32px;font-weight:800;letter-spacing:-.03em;margin-bottom:4px}.sub{color:#999;font-size:12px;margin-bottom:30px;font-family:'DM Mono',monospace}
+      .pl{border:2px solid #1A1814;border-radius:12px;padding:20px;margin-bottom:24px}.pl-t{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#B0ACA4;margin-bottom:14px}
+      .pl-r{display:flex;justify-content:space-between;padding:8px 0;font-size:13px;border-bottom:1px solid #F0EEE8}.pl-f{display:flex;justify-content:space-between;padding:14px 0 0;margin-top:8px;border-top:2px solid #1A1814;font-size:20px;font-weight:800;letter-spacing:-.02em}
+      .green{color:#1E7E5A}.red{color:#C41A1A}.muted{color:#7A7570}
+      .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}.stat{border:1.5px solid #E4E1D8;border-radius:10px;padding:14px}.stat-l{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#B0ACA4;margin-bottom:4px}.stat-v{font-size:18px;font-weight:800;letter-spacing:-.02em}
+      table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:20px}thead tr{border-bottom:2px solid #1A1814}th{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#7A7570;padding:8px 6px;text-align:left}th:last-child,td.r{text-align:right}td{padding:9px 6px;border-bottom:1px solid #F0EEE8}
+      .sec{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#B0ACA4;margin:22px 0 12px}
+      @media print{body{padding:20px}}
+    </style></head><body>
+      <h1>P&L Report</h1><div class="sub">Period: ${rl} · ${isoFmt(nowISO())}</div>
+      <div class="pl"><div class="pl-t">Profit & Loss</div>
+        <div class="pl-r"><span>Gross Revenue</span><span class="green"><strong>${fmt(rev)}</strong></span></div>
+        <div class="pl-r"><span class="muted" style="padding-left:12px">— Client Reimbursables</span><span class="muted">${fmt(cExp)}</span></div>
+        <div class="pl-r"><span class="muted" style="padding-left:12px">— Office Overhead</span><span class="red">${fmt(offT)}</span></div>
+        <div class="pl-f"><span>Net Profit</span><span class="${net>=0?"green":"red"}">${fmt(net)}</span></div>
+      </div>
+      <div class="stats"><div class="stat"><div class="stat-l">Revenue</div><div class="stat-v green">${fmt(rev)}</div></div><div class="stat"><div class="stat-l">Overhead</div><div class="stat-v red">${fmt(offT)}</div></div><div class="stat"><div class="stat-l">Net Profit</div><div class="stat-v ${net>=0?"green":"red"}">${fmt(net)}</div></div></div>
+      <div class="sec">Revenue by Client</div>
+      <table><tr><th>Client</th><th>Jobs</th><th>Total</th></tr>${cRows.map(([c,v])=>`<tr><td><strong>${c}</strong></td><td>${v.count}</td><td class="r">${fmt(v.total)}</td></tr>`).join("")}</table>
+      ${offCR.length>0?`<div class="sec">Office Overhead</div><table><tr><th>Category</th><th>Total</th></tr>${offCR.map(([c,v])=>`<tr><td>${c}</td><td class="r">${fmt(v)}</td></tr>`).join("")}</table>`:""}
+      <div class="sec">Job Entries</div>
+      <table><tr><th>Date</th><th>Client</th><th>Description</th><th>Total</th></tr>${data.map(e=>`<tr><td>${isoFmt(e.dateISO)}</td><td>${e.client}</td><td>${e.jobDescription||"—"}</td><td class="r">${fmt(calcTotal(e))}</td></tr>`).join("")}</table>
+      ${offD.length>0?`<div class="sec">Office Expenses</div><table><tr><th>Date</th><th>Description</th><th>Category</th><th>Amount</th></tr>${offD.map(e=>`<tr><td>${e.dateDisplay||isoFmt(e.date)}</td><td>${e.description}</td><td>${e.category}</td><td class="r">${fmt(e.amount)}</td></tr>`).join("")}</table>`:""}
+    <script>window.onload=()=>window.print();</script></body></html>`);
+    w.document.close();
+  };
+  return <div style={{padding:"16px 16px 80px"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}><div style={{fontFamily:"'Outfit',sans-serif",fontSize:28,fontWeight:800,color:C.txt,letterSpacing:"-0.03em"}}>Report</div><button onClick={printR} style={{background:C.acc,color:C.accT,border:"none",fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,padding:"9px 18px",borderRadius:10,cursor:"pointer"}}>Print / PDF</button></div>
+    <div style={{...card,marginBottom:16}}>
+      <div style={secT}>Date Range</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:range==="custom"?14:0}}>{[["week","This Week"],["month","This Month"],["year","This Year"],["all","All Time"],["custom","Custom"]].map(([v,l])=><button key={v} style={{...pill(range===v),fontSize:11,padding:"6px 12px"}} onClick={()=>setRange(v)}>{l}</button>)}</div>
+      {range==="custom"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:14}}><div><label style={lbl}>From</label><input type="date" style={inp} value={cf} onChange={e=>setCf(e.target.value)}/></div><div><label style={lbl}>To</label><input type="date" style={inp} value={ct} onChange={e=>setCt(e.target.value)}/></div></div>}
+    </div>
+    <div style={{background:C.sur,border:`2px solid ${C.acc}`,borderRadius:14,padding:20,marginBottom:14}}>
+      <div style={secT}>Profit & Loss</div>
+      {[{label:"Gross Revenue",value:fmt(rev),color:C.grn,sub:false},{label:"— Client Reimbursables",value:fmt(cExp),color:C.sub,sub:true},{label:"— Office Overhead",value:fmt(offT),color:C.red,sub:true}].map((row,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderBottom:`1px solid ${C.bdr}`}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:13,color:row.sub?C.sub:C.txt,paddingLeft:row.sub?12:0}}>{row.label}</span><span style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:row.color}}>{row.value}</span></div>)}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:14,marginTop:4}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:16,fontWeight:800,color:C.txt}}>Net Profit</span><span style={{fontFamily:"'Outfit',sans-serif",fontSize:24,fontWeight:800,color:net>=0?C.grn:C.red,letterSpacing:"-0.03em"}}>{fmt(net)}</span></div>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}><Chip label="Revenue" value={fmt(rev)} grn/><Chip label="Overhead" value={fmt(offT)} red/><Chip label="Rush Fees" value={fmt(rush)}/><Chip label="Client Exp." value={fmt(cExp)}/><Chip label="Jobs" value={data.length}/><Chip label="Paid" value={`${data.filter(e=>e.invoicePaid).length}/${data.filter(e=>e.invoiceNum).length}`}/></div>
+    {cRows.length>0&&<div style={card}><div style={secT}>Revenue by Client</div>{cRows.map(([c,v])=><div key={c} style={{marginBottom:12}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><div><div style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:C.txt}}>{c}</div><div style={{fontSize:11,color:C.muted}}>{v.count} job{v.count!==1?"s":""}</div></div><div style={{fontFamily:"'Outfit',sans-serif",fontSize:16,fontWeight:800,color:C.txt}}>{fmt(v.total)}</div></div><div style={{height:5,background:C.alt,borderRadius:4}}><div style={{height:"100%",width:`${(v.total/maxC)*100}%`,background:C.acc,borderRadius:4}}/></div></div>)}</div>}
+    {offCR.length>0&&<div style={card}><div style={secT}>Office Overhead by Category</div>{offCR.map(([cat,t])=><div key={cat} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderBottom:`1px solid ${C.bdr}`}}><Bdg color="pur">{cat}</Bdg><span style={{fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,color:C.red}}>{fmt(t)}</span></div>)}<div style={{display:"flex",justifyContent:"space-between",paddingTop:12,marginTop:4}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,color:C.sub}}>Total</span><span style={{fontFamily:"'Outfit',sans-serif",fontSize:16,fontWeight:800,color:C.red}}>{fmt(offT)}</span></div></div>}
+    {data.length===0&&offD.length===0&&<div style={{textAlign:"center",paddingTop:50,color:C.muted,fontFamily:"'Outfit',sans-serif",fontSize:15}}>No data for this period</div>}
+  </div>;
+}
+
+// ── Invoice Tab ────────────────────────────────────────────────────────────
+function InvoiceTab({entries,setEntries,settings}) {
+  const [selected,setSelected]=useState([]);
+  const [dueDate,setDueDate]=useState("");
+  const [note,setNote]=useState("");
+  const [clientEmail,setClientEmail]=useState("");
+  const [filterClient,setFilterClient]=useState("ALL");
+  const [preview,setPreview]=useState(null);
+  const [downloaded,setDownloaded]=useState(false);
+
+  const uninvoiced=entries.filter(e=>!e.invoiceNum);
+  const clients=["ALL",...new Set(uninvoiced.map(e=>e.client))];
+  const visible=filterClient==="ALL"?uninvoiced:uninvoiced.filter(e=>e.client===filterClient);
+  const toggle=id=>setSelected(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+  const selEntries=entries.filter(e=>selected.includes(e.id));
+  const invTotal=selEntries.reduce((s,e)=>s+calcTotal(e),0);
+
+  const generateInvoice=()=>{
+    if(!selected.length)return;
+    const invNum=genInvNum(entries);
+    const from=settings.yourName||"Your Name";
+    const addr=settings.yourAddress||"";
+    const email=settings.yourEmail||"";
+    const phone=settings.yourPhone||"";
+    const clientName=selEntries[0]?.client||"Client";
+    setEntries(p=>p.map(e=>selected.includes(e.id)?{...e,invoiceNum:invNum,invoiceDue:dueDate}:e));
+    const inv={invNum,from,addr,email,phone,clientName,entries:selEntries,total:invTotal,dueDate,note};
+    setPreview(inv);
+    setDownloaded(false);
+    // Store for Claude to email
+    if(clientEmail){
+      window.__invoiceEmail={invNum,clientName,to:clientEmail,from,total:fmt(invTotal),dueDate,subject:`Invoice ${invNum} from ${from} — ${fmt(invTotal)} due`};
+    }
+    setSelected([]);setNote("");
+  };
+
+  const downloadInvoice=()=>{
+    if(!preview)return;
+    const html=buildInvHtml(preview);
+    const blob=new Blob([html],{type:"text/html"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;a.download=`${preview.invNum}.html`;
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);URL.revokeObjectURL(url);
+    setDownloaded(true);
+    setTimeout(()=>setDownloaded(false),4000);
+  };
+
+  const invoicedNums=[...new Set(entries.filter(e=>e.invoiceNum).map(e=>e.invoiceNum))];
+
+  return <div style={{padding:"16px 16px 80px"}}>
+
+    {/* Invoice Preview Modal */}
+    {preview&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.65)",zIndex:100,display:"flex",flexDirection:"column",overflowY:"auto"}}>
+      <div style={{background:"#1A1814",padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0,position:"sticky",top:0,zIndex:101,gap:10,flexWrap:"wrap"}}>
+        <span style={{fontFamily:"'Geist Mono','DM Mono',monospace",fontSize:12,color:"#888"}}>{preview.invNum} · {fmt(preview.total)}</span>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={downloadInvoice} style={{background:downloaded?"#22c55e":"#e8ff00",color:"#1A1814",border:"none",fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:700,padding:"8px 18px",borderRadius:8,cursor:"pointer",transition:"background .3s"}}>
+            {downloaded?"✓ Downloaded":"⬇ Download Invoice"}
+          </button>
+          <button onClick={()=>setPreview(null)} style={{background:"transparent",border:"1.5px solid #444",color:"#aaa",fontFamily:"'Outfit',sans-serif",fontSize:13,fontWeight:600,padding:"8px 14px",borderRadius:8,cursor:"pointer"}}>✕ Close</button>
+        </div>
+      </div>
+      {clientEmail&&<div style={{background:"#0f2744",padding:"10px 16px",textAlign:"center",flexShrink:0}}>
+        <span style={{fontSize:12,color:"#7ab3e8"}}>To email this to <strong style={{color:"#e8ff00"}}>{clientEmail}</strong>, type <strong style={{color:"#e8ff00"}}>"Send invoice email"</strong> in the chat ↑</span>
+      </div>}
+      <div style={{flex:1,padding:"20px 12px",display:"flex",justifyContent:"center"}}>
+        <div style={{background:"#fff",width:"100%",maxWidth:680,borderRadius:12,overflow:"hidden",boxShadow:"0 8px 40px rgba(0,0,0,0.3)"}}>
+          <InvDoc inv={preview}/>
+        </div>
+      </div>
+    </div>}
+
+    <div style={{fontFamily:"'Outfit',sans-serif",fontSize:28,fontWeight:800,color:C.txt,letterSpacing:"-0.03em",marginBottom:6}}>Invoice</div>
+    <div style={{fontSize:13,color:C.muted,marginBottom:18,fontFamily:"'Geist Mono','DM Mono',monospace"}}>Select jobs to invoice</div>
+
+    {clients.length>2&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>{clients.map(c=><button key={c} style={{...pill(filterClient===c),fontSize:11,padding:"6px 12px"}} onClick={()=>{setFilterClient(c);setSelected([]);}}>{c}</button>)}</div>}
+
+    {visible.length===0?<div style={{...card,textAlign:"center",color:C.muted,fontFamily:"'Outfit',sans-serif",fontSize:15,padding:"44px 0"}}>{uninvoiced.length===0?"All entries invoiced ✓":"No entries for this filter"}</div>:<>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <button style={{...pill(false),fontSize:11,padding:"6px 12px"}} onClick={()=>setSelected(visible.map(e=>e.id))}>Select All</button>
+        {selected.length>0&&<button style={{...pill(false),fontSize:11,padding:"6px 12px"}} onClick={()=>setSelected([])}>Clear</button>}
+      </div>
+      {visible.map(e=>{const sel=selected.includes(e.id);return(
+        <div key={e.id} onClick={()=>toggle(e.id)} style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",marginBottom:8,background:sel?"#F5FFF9":C.sur,border:`1.5px solid ${sel?C.grn:C.bdr}`,borderRadius:12,cursor:"pointer",transition:"all .15s",boxShadow:sel?"0 2px 12px rgba(30,126,90,0.08)":"none"}}>
+          <div style={{width:20,height:20,borderRadius:6,flexShrink:0,border:`2px solid ${sel?C.grn:C.bdrS}`,background:sel?C.grn:"transparent",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:12,fontWeight:700,transition:"all .15s"}}>{sel?"✓":""}</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontFamily:"'Outfit',sans-serif",fontSize:15,fontWeight:700,color:C.txt}}>{e.client}</span><span style={{fontFamily:"'Outfit',sans-serif",fontSize:16,fontWeight:800,color:C.txt}}>{fmt(calcTotal(e))}</span></div>
+            <div style={{fontSize:12,color:C.muted,fontFamily:"'Geist Mono','DM Mono',monospace"}}>{isoFmt(e.dateISO)}{e.jobDescription?` · ${e.jobDescription}`:""}</div>
+          </div>
+        </div>
+      );})}
+    </>}
+
+    {selected.length>0&&<div style={{...card,marginTop:16,boxShadow:"0 4px 20px rgba(0,0,0,.06)"}}>
+      <div style={secT}>Invoice Details</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+        <div><label style={lbl}>Due Date</label><input type="date" style={inp} value={dueDate} onChange={e=>setDueDate(e.target.value)}/></div>
+        <div><label style={lbl}>Note (optional)</label><input style={inp} placeholder="Net 30, etc." value={note} onChange={e=>setNote(e.target.value)}/></div>
+      </div>
+      <div style={{marginBottom:16}}>
+        <label style={lbl}>Client Email (optional)</label>
+        <input style={{...inp,borderColor:clientEmail?C.blu+"80":C.bdr}} type="email" placeholder="client@example.com" value={clientEmail} onChange={e=>setClientEmail(e.target.value)}/>
+        {clientEmail&&<div style={{fontSize:11,color:C.blu,marginTop:5,fontFamily:"'Outfit',sans-serif"}}>After generating, type "Send invoice email" in the chat and Claude will draft it in Gmail.</div>}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:14,borderTop:`1.5px solid ${C.bdr}`}}>
+        <div><div style={lbl}>{selected.length} Job{selected.length!==1?"s":""}</div><div style={{fontFamily:"'Outfit',sans-serif",fontSize:26,fontWeight:800,color:C.txt,letterSpacing:"-0.03em"}}>{fmt(invTotal)}</div></div>
+        <button onClick={generateInvoice} style={{background:C.acc,color:C.accT,border:"none",fontFamily:"'Outfit',sans-serif",fontSize:14,fontWeight:700,padding:"12px 28px",borderRadius:10,cursor:"pointer"}}>Generate Invoice</button>
+      </div>
+    </div>}
+
+    {invoicedNums.length>0&&<div style={{...card,marginTop:16}}>
+      <div style={secT}>Invoice History</div>
+      {invoicedNums.map(invNum=>{
+        const jobs=entries.filter(e=>e.invoiceNum===invNum);
+        const t=jobs.reduce((s,e)=>s+calcTotal(e),0);
+        const paid=jobs.every(e=>e.invoicePaid);
+        return <div key={invNum} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0",borderBottom:`1px solid ${C.bdr}`}}>
+          <div><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}><span style={{fontFamily:"'Geist Mono','DM Mono',monospace",fontSize:13,fontWeight:600,color:C.txt}}>{invNum}</span>{paid?<Bdg color="grn">Paid</Bdg>:<Bdg color="org">Outstanding</Bdg>}</div><div style={{fontSize:11,color:C.muted}}>{[...new Set(jobs.map(j=>j.client))].join(", ")} · {jobs.length} job{jobs.length!==1?"s":""}</div></div>
+          <div style={{fontFamily:"'Outfit',sans-serif",fontSize:18,fontWeight:800,color:paid?C.grn:C.txt,letterSpacing:"-0.02em"}}>{fmt(t)}</div>
+        </div>;
+      })}
+    </div>}
+  </div>;
+}
+
+// ── Settings Tab ───────────────────────────────────────────────────────────
+function SettingsTab({settings,setSettings}) {
+  const sf=(k,v)=>setSettings(s=>({...s,[k]:v}));
+  return <div style={{padding:"16px 16px 80px"}}>
+    <div style={{fontFamily:"'Outfit',sans-serif",fontSize:28,fontWeight:800,color:C.txt,letterSpacing:"-0.03em",marginBottom:20}}>Settings</div>
+    <div style={card}><div style={secT}>Your Info (appears on invoices)</div>
+      {[{k:"yourName",l:"Name / Business",p:"Your Name"},{k:"yourAddress",l:"Address",p:"Brooklyn, NY"},{k:"yourEmail",l:"Email",p:"you@email.com"},{k:"yourPhone",l:"Phone",p:"+1 (555) 000-0000"}].map(f=><div key={f.k} style={{marginBottom:14}}><label style={lbl}>{f.l}</label><input style={inp} placeholder={f.p} value={settings[f.k]||""} onChange={e=>sf(f.k,e.target.value)}/></div>)}
+    </div>
+    <div style={{textAlign:"center",fontSize:11,color:C.muted,fontFamily:"'Geist Mono','DM Mono',monospace"}}>Data stored locally · Not synced</div>
+  </div>;
+}
+
+// ── Root ───────────────────────────────────────────────────────────────────
+function App() {
+  const [tab,setTab]=useState("LOG");
+  const [entries,setEntries]=useState(()=>load(KEYS.entries,[]));
+  const [officeExp,setOfficeExp]=useState(()=>load(KEYS.office,[]));
+  const [recurring,setRecurring]=useState(()=>load(KEYS.recur,[]));
+  const [settings,setSettings]=useState(()=>load(KEYS.settings,{yourName:"BCG Copy",yourAddress:"672 Empire Blvd #7C, Brooklyn, NY 11213",yourEmail:"",yourPhone:"(616) 334-4647"}));
+  useEffect(()=>{save(KEYS.entries,entries);},[entries]);
+  useEffect(()=>{save(KEYS.office,officeExp);},[officeExp]);
+  useEffect(()=>{save(KEYS.recur,recurring);},[recurring]);
+  useEffect(()=>{save(KEYS.settings,settings);},[settings]);
+  return <>
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&display=swap');
+      *{margin:0;padding:0;box-sizing:border-box}body{background:${C.bg};color:${C.txt}}
+      ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:${C.bdr};border-radius:4px}
+      input::placeholder,textarea::placeholder{color:${C.muted}}
+      input:focus,textarea:focus,select:focus{border-color:${C.acc}!important;box-shadow:0 0 0 3px rgba(26,24,20,.06)!important;outline:none}
+      input[type=date]::-webkit-calendar-picker-indicator{opacity:.4;cursor:pointer}
+      button:active{transform:scale(.97)}select{cursor:pointer}
+    `}</style>
+    <div style={{minHeight:"100vh",background:C.bg}}>
+      <NavBar active={tab} setActive={setTab}/>
+      {tab==="LOG"&&<LogTab entries={entries} setEntries={setEntries}/>}
+      {tab==="OFFICE"&&<OfficeTab officeExp={officeExp} setOfficeExp={setOfficeExp} recurring={recurring} setRecurring={setRecurring}/>}
+      {tab==="REPORT"&&<ReportTab entries={entries} officeExp={officeExp}/>}
+      {tab==="INVOICE"&&<InvoiceTab entries={entries} setEntries={setEntries} settings={settings}/>}
+      {tab==="SETTINGS"&&<SettingsTab settings={settings} setSettings={setSettings}/>}
+    </div>
+  </>;
+}
+
+    // Mount
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+  <script>
+    // Register service worker for PWA offline support
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .then(r => console.log('SW registered'))
+          .catch(e => console.log('SW failed:', e));
+      });
+    }
+  </script>
+</body>
+</html>
